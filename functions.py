@@ -18,7 +18,7 @@ def get_companies():
 
     return profiles_df
 
-def filter_all_companies(companies, marketCap_thresh=2_000_000_000, averageVolume_thresh=5_000_000, start_date="2018-11-16", end_date="2022-11-16"):
+def filter_all_companies(companies, marketCap_thresh=50_000_000_000, averageVolume_thresh=10_000_000, start_date="2022-11-16", end_date="2024-11-16"):
     """
     Filters companies by market cap and average volume.
     Fetches historical closing prices for each filtered symbol.
@@ -48,8 +48,7 @@ def filter_all_companies(companies, marketCap_thresh=2_000_000_000, averageVolum
         except Exception as e:
             # Print or log error message for the symbol
             print(f"Error fetching data for {symbol}: {e}")
-        # Add delay to avoid rate limiting
-        time.sleep(0.05)
+
 
     # Initialize an empty DataFrame to store the historical closing prices
     filtered_symbols_df = pd.DataFrame()
@@ -64,7 +63,6 @@ def filter_all_companies(companies, marketCap_thresh=2_000_000_000, averageVolum
         except Exception as e:
             # Print or log error message for the symbol if historical data cannot be fetched
             print(f"Error fetching historical data for {symbol}: {e}")
-        # Add delay to avoid rate limiting
-        time.sleep(0.05)
+
 
     return filtered_symbols_df
