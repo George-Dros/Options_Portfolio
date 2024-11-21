@@ -5,6 +5,7 @@ from datetime import datetime
 import yfinance as yf
 from matplotlib import pyplot as plt
 from yahooquery import Ticker
+from scipy.stats import norm
 
 
 def get_companies():
@@ -79,19 +80,24 @@ def calculate_time_to_expiration(expiration_date_str: str) -> float:
     expiration_date_str (str): Expiration date in the format 'YYYY-MM-DD'
 
     Returns:
-    float: Time to expiration in years
+    float: Time to expiration in years (non-negative)
     """
     # Parse the expiration date string to a datetime object
     expiration_date = datetime.strptime(expiration_date_str, "%Y-%m-%d")
 
-    # Get today's date
-    current_date = datetime.now()
+    # Get the current datetime
+    current_datetime = datetime.now()
 
-    # Calculate the number of days to expiration
-    days_to_expiration = (expiration_date - current_date).days
+    # Calculate the time difference in seconds
+    time_diff_seconds = (expiration_date - current_datetime).total_seconds()
 
-    # Convert days to years (use 365 for simplicity)
-    T = days_to_expiration / 365.0
+    # Ensure time difference is non-negative
+    if time_diff_seconds <= 0:
+        # Option has expired or expires today; set T to a minimal positive value or filter out
+        T = 1 / 365.0  # One day in years
+    else:
+        # Convert seconds to years
+        T = time_diff_seconds / (365.0 * 24 * 60 * 60)  # Total seconds in a year
 
     return T
 
@@ -228,3 +234,27 @@ def rho_put(S, K, T, r, sigma):
     d2 = (np.log(S / K) + (r - 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     return -K * T * np.exp(-r * T) * norm.cdf(-d2)
     
+class OptionsPortfolioOptimizer:
+    def __init__(self, options_df, budget):
+        """
+        Initialize the optimizer with the options DataFrame and budget.
+        """
+        self.options_df = options_df
+        self.budget = budget
+
+    def budget_constraint(self, weights):
+        return self.budget - np.sum(weights * self.options_df['market_price'] * 100)
+
+
+    def delta_neutral_constraint(self, weights):
+        """
+        Ensure the portfolio is delta neutral.
+        """
+        return np.sum(weights * self.options_df['delta'])
+
+    
+    def objective_function(self, weights):
+        expected_returns = self.options_df['expected_return']
+        return np.sum(weights * expected_returns)
+
+
