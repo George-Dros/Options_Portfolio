@@ -233,18 +233,24 @@ def rho_call(S, K, T, r, sigma):
 def rho_put(S, K, T, r, sigma):
     d2 = (np.log(S / K) + (r - 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     return -K * T * np.exp(-r * T) * norm.cdf(-d2)
-    
+
+
 class OptionsPortfolioOptimizer:
-    def __init__(self, options_df, budget):
+    def __init__(self, options_df, budget, alpha=1.0):
         """
         Initialize the optimizer with the options DataFrame and budget.
         """
         self.options_df = options_df
+
+        # Calculate price difference and expected return
         self.budget = budget
+  
 
     def budget_constraint(self, weights):
+        """
+        Ensure total cost does not exceed the budget.
+        """
         return self.budget - np.sum(weights * self.options_df['market_price'] * 100)
-
 
     def delta_neutral_constraint(self, weights):
         """
@@ -252,9 +258,61 @@ class OptionsPortfolioOptimizer:
         """
         return np.sum(weights * self.options_df['delta'])
 
-    
+
     def objective_function(self, weights):
-        expected_returns = self.options_df['expected_return']
-        return np.sum(weights * expected_returns)
+        """
+        Maximize expected returns.
+        """
+        return np.sum(weights * self.options_df['expected_return'])
+         
 
+def adjust_weights_to_constraints(optimized_portfolio, budget, vega_min, vega_max, theta_min, theta_max, delta_tolerance=1e-5):
+    """
+    Adjust integer weights in the portfolio to satisfy constraints after rounding.
+    """
+    # Extract portfolio metrics
+    total_cost = (optimized_portfolio['market_price'] * optimized_portfolio['optimized_N'] * 100).sum()
+    total_delta = (optimized_portfolio['delta'] * optimized_portfolio['optimized_N'] * 100).sum()
+    total_vega = (optimized_portfolio['vega'] * optimized_portfolio['optimized_N'] * 100).sum()
+    total_theta = (optimized_portfolio['theta'] * optimized_portfolio['optimized_N'] * 100).sum()
 
+    # Iterate through rows for adjustment
+    for index, row in optimized_portfolio.iterrows():
+        current_weight = optimized_portfolio.at[index, 'optimized_N']
+
+        if abs(total_delta) > delta_tolerance:
+            # Adjust for delta neutrality
+            adjustment = -total_delta / (row['delta'] * 100) if row['delta'] != 0 else 0
+            adjusted_weight = max(1, current_weight + round(adjustment))  # Keep at least 1 contract
+            optimized_portfolio.at[index, 'optimized_N'] = adjusted_weight
+
+        if total_vega < vega_min or total_vega > vega_max:
+            # Adjust for vega limits
+            adjustment = (vega_min - total_vega) / (row['vega'] * 100) if total_vega < vega_min else (vega_max - total_vega) / (row['vega'] * 100)
+            adjusted_weight = max(1, current_weight + round(adjustment))  # Keep at least 1 contract
+            optimized_portfolio.at[index, 'optimized_N'] = adjusted_weight
+
+        if total_theta < theta_min or total_theta > theta_max:
+            # Adjust for theta limits
+            adjustment = (theta_min - total_theta) / (row['theta'] * 100) if total_theta < theta_min else (theta_max - total_theta) / (row['theta'] * 100)
+            adjusted_weight = max(1, current_weight + round(adjustment))  # Keep at least 1 contract
+            optimized_portfolio.at[index, 'optimized_N'] = adjusted_weight
+
+        # Recalculate metrics after adjustment
+        total_cost = (optimized_portfolio['market_price'] * optimized_portfolio['optimized_N'] * 100).sum()
+        total_delta = (optimized_portfolio['delta'] * optimized_portfolio['optimized_N'] * 100).sum()
+        total_vega = (optimized_portfolio['vega'] * optimized_portfolio['optimized_N'] * 100).sum()
+        total_theta = (optimized_portfolio['theta'] * optimized_portfolio['optimized_N'] * 100).sum()
+
+        # Stop adjustments if all constraints are satisfied
+        if abs(total_delta) <= delta_tolerance and vega_min <= total_vega <= vega_max and theta_min <= total_theta <= theta_max:
+            break
+
+    # Ensure budget constraint is still satisfied
+    if total_cost > budget:
+        print("Warning: Budget constraint violated after adjustments!")
+    
+    return optimized_portfolio
+                      
+                      
+                 
