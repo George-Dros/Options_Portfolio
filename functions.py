@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import yfinance as yf
 from matplotlib import pyplot as plt
 from yahooquery import Ticker
 from scipy.stats import norm
 
+r= 0.03
 
 def get_companies():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -71,8 +72,36 @@ def filter_all_companies(companies, marketCap_thresh=50_000_000_000, averageVolu
     return filtered_symbols_df
 
 
+def calculate_time_to_expiration(expiration_date_str: str, reference_date_str: str) -> float:
+    """
+    Calculate the time to expiration in years from a specific reference date.
 
-def calculate_time_to_expiration(expiration_date_str: str) -> float:
+    Parameters:
+    expiration_date_str (str): Expiration date in the format 'YYYY-MM-DD'
+    reference_date_str (str): Reference date in the format 'YYYY-MM-DD'
+
+    Returns:
+    float: Time to expiration in years (non-negative)
+    """
+    # Parse the expiration date and reference date strings to datetime objects
+    expiration_date = datetime.strptime(expiration_date_str, "%Y-%m-%d")
+    reference_date = datetime.strptime(reference_date_str, "%Y-%m-%d")
+
+    # Calculate the time difference in seconds
+    time_diff_seconds = (expiration_date - reference_date).total_seconds()
+
+    # Ensure time difference is non-negative
+    if time_diff_seconds <= 0:
+        # Option has expired or expires on the reference date; set T to a minimal positive value or filter out
+        T = 1 / 365.0  # One day in years
+    else:
+        # Convert seconds to years
+        T = time_diff_seconds / (365.0 * 24 * 60 * 60)  # Total seconds in a year
+
+    return T
+
+
+def calculate_time_to_expiration_from_today(expiration_date_str: str) -> float:
     """
     Calculate the time to expiration in years from today.
 
@@ -102,19 +131,69 @@ def calculate_time_to_expiration(expiration_date_str: str) -> float:
     return T
 
 
-def get_option_chains_spot(ticker_symbol, retries=3, delay=2):
+
+def calculate_time_to_expiration_from_future(df, date_column, days_from_now):
+    """
+    Calculate the time to expiration in years for a column of dates in a DataFrame,
+    considering today + a specified number of days as the reference date.
+
+    Parameters:
+    - df (pd.DataFrame): The DataFrame containing the date column.
+    - date_column (str): The name of the column with expiration dates (format 'YYYY-MM-DD').
+    - days_from_now (int): Number of days from today to consider as the reference date.
+
+    Returns:
+    - pd.Series: A Series with the time to expiration in years (non-negative).
+    """
+    # Convert the date column to datetime if it's not already
+    df[date_column] = pd.to_datetime(df[date_column])
+
+    # Calculate the future reference date
+    future_reference_date = datetime.now() + timedelta(days=days_from_now)
+
+    # Calculate the time to expiration in seconds
+    time_diff_seconds = (df[date_column] - future_reference_date).dt.total_seconds()
+
+    # Convert seconds to years and ensure non-negative values
+    time_to_expiration = time_diff_seconds.clip(lower=0) / (365.0 * 24 * 60 * 60)
+
+    # Handle cases where the expiration is on or before the reference date
+    minimal_value = 1 / 365.0  # One day in years
+    time_to_expiration = time_to_expiration.where(time_to_expiration > 0, minimal_value)
+
+    return time_to_expiration
+
+def get_option_chains_spot(ticker_symbol, retries=3, delay=2, start_date=None, end_date=None):
+    """
+    Fetch option chains and spot price for a given ticker within a specific historical period.
+
+    Parameters:
+    ticker_symbol (str): The ticker symbol of the asset.
+    retries (int): Number of retry attempts for fetching data.
+    delay (int): Delay between retries in seconds.
+    start_date (str): Start date for historical spot price in 'YYYY-MM-DD' format. Defaults to None.
+    end_date (str): End date for historical spot price in 'YYYY-MM-DD' format. Defaults to None.
+
+    Returns:
+    tuple: A tuple containing calls DataFrame, puts DataFrame, and spot price.
+    """
     # Fetch the ticker data
     ticker = yf.Ticker(ticker_symbol)
     for attempt in range(retries):
         try:
             # Get the historical spot price
-            history = ticker.history(period="1d")
+            if start_date and end_date:
+                # Fetch spot price for the given date range
+                history = ticker.history(start=start_date, end=end_date)
+            else:
+                # Default to 1-day historical data
+                history = ticker.history(period="1d")
 
             # Check if the history DataFrame is empty
             if history.empty:
                 raise ValueError(f"No historical data available for ticker {ticker_symbol}.")
 
-            # Get the spot price from the history DataFrame
+            # Get the spot price from the history DataFrame (use the first available price)
             spot_price = history["Close"].iloc[0]
 
             # Get expiration dates
@@ -137,13 +216,17 @@ def get_option_chains_spot(ticker_symbol, retries=3, delay=2):
 
             # For calls_all DataFrame
             calls_all = calls_all[["strike", "lastPrice", "impliedVolatility", "expiration"]]
-            calls_all["time_to_expiration"] = calls_all["expiration"].apply(calculate_time_to_expiration)
+            calls_all["time_to_expiration"] = calls_all["expiration"].apply(
+                lambda x: calculate_time_to_expiration(x, history.index[0].strftime('%Y-%m-%d'))
+            )
             calls_all = calls_all[calls_all["time_to_expiration"] > 0.0]
             calls_all = calls_all.reset_index(drop=True)
 
             # For puts_all DataFrame
             puts_all = puts_all[["strike", "lastPrice", "impliedVolatility", "expiration"]]
-            puts_all["time_to_expiration"] = puts_all["expiration"].apply(calculate_time_to_expiration)
+            puts_all["time_to_expiration"] = puts_all["expiration"].apply(
+                lambda x: calculate_time_to_expiration(x, history.index[0].strftime('%Y-%m-%d'))
+            )
             puts_all = puts_all[puts_all["time_to_expiration"] > 0.0]
             puts_all = puts_all.reset_index(drop=True)
 
@@ -157,7 +240,7 @@ def get_option_chains_spot(ticker_symbol, retries=3, delay=2):
 
     # If all retries fail, raise an error
     raise ValueError(f"Failed to get spot price and options data for ticker {ticker_symbol} after {retries} attempts.")
-    
+
     
     
 def black_scholes_call(S, K, T, r, sigma):
@@ -314,5 +397,97 @@ def adjust_weights_to_constraints(optimized_portfolio, budget, vega_min, vega_ma
     
     return optimized_portfolio
                       
-                      
-                 
+
+def process_portfolio(portfolio_df):
+    """
+    Processes a portfolio DataFrame and calculates Black-Scholes prices, greeks, and expected returns.
+
+    Parameters:
+    - portfolio_df (pd.DataFrame): The DataFrame containing portfolio data. Must include columns:
+        ["spot_price", "strike", "time_to_expiration", "impliedVolatility", "market_price", "type"].
+    - r (float): The risk-free rate.
+
+    Returns:
+    - pd.DataFrame: The updated DataFrame with new columns for calculated values.
+    """
+    for i in range(len(portfolio_df)):
+        # Extracting row values
+        spot_price = portfolio_df.loc[i, "spot_price"]
+        strike_price = portfolio_df.loc[i, "strike"]
+        time_to_expiration = portfolio_df.loc[i, "time_to_expiration"]
+        impliedVolatility = portfolio_df.loc[i, "impliedVolatility"]
+        market_price = portfolio_df.loc[i, "market_price"]
+
+        # Determine if the option is a call or put and calculate accordingly
+        if portfolio_df.loc[i, "type"] == "call":
+            bs_price = black_scholes_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "blackScholes_Price"] = bs_price
+            portfolio_df.loc[i, "expected_return"] = market_price - bs_price
+            portfolio_df.loc[i, "delta"] = delta_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "gamma"] = gamma(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "vega"] = vega(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "theta_call"] = theta_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "rho"] = rho_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+
+        elif portfolio_df.loc[i, "type"] == "put":
+            bs_price = black_scholes_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "blackScholes_Price"] = bs_price
+            portfolio_df.loc[i, "expected_return"] = market_price - bs_price
+            portfolio_df.loc[i, "delta"] = delta_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "gamma"] = gamma(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "vega"] = vega(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "theta_call"] = theta_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            portfolio_df.loc[i, "rho"] = rho_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+
+    return portfolio_df
+
+
+def compute_portfolio_stats(portfolio_df):
+    """
+    Computes portfolio-level totals for Greeks and expected returns.
+
+    Parameters:
+    - portfolio_df (pd.DataFrame): The DataFrame containing portfolio data. Must include columns:
+        ["delta", "vega", "gamma", "theta", "rho", "expected_return", "optimized_N"].
+
+    Returns:
+    - pd.DataFrame: A single-row DataFrame with aggregated portfolio-level results.
+    """
+    # List of Greeks to process
+    greeks = ["delta", "vega", "gamma", "theta", "rho"]
+    
+    # Initialize a dictionary to store portfolio totals
+    portfolio_data = {}
+    
+    # Compute the weighted totals for each Greek
+    for greek in greeks:
+        portfolio_data[f"total_{greek}"] = (portfolio_df[greek] * portfolio_df["optimized_N"]*100).sum()
+
+    # Compute the weighted total expected return
+    portfolio_data["total_expected_return"] = (portfolio_df["expected_return"] * portfolio_df["optimized_N"]*100).sum()
+
+    # Convert to DataFrame
+    portfolio_summary_df = pd.DataFrame([portfolio_data])
+    
+    return portfolio_summary_df
+
+
+def increment_dates(dataframe, date_column, days_increment):
+    """
+    Increments dates in a specified column by a given number of days.
+
+    Parameters:
+    - dataframe (pd.DataFrame): The input DataFrame.
+    - date_column (str): The column name containing dates as strings or datetime objects.
+    - days_increment (int): Number of days to increment (can be negative for decrement).
+
+    Returns:
+    - pd.DataFrame: The DataFrame with updated dates.
+    """
+    # Convert the column to datetime if it's not already
+    dataframe[date_column] = pd.to_datetime(dataframe[date_column])
+    
+    # Increment the dates by the specified number of days
+    dataframe[date_column] += timedelta(days=days_increment)
+    
+    return dataframe
