@@ -6,6 +6,10 @@ import yfinance as yf
 from matplotlib import pyplot as plt
 from yahooquery import Ticker
 from scipy.stats import norm
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.interpolate import griddata
+import plotly.graph_objects as go
 
 r= 0.03
 
@@ -70,6 +74,40 @@ def filter_all_companies(companies, marketCap_thresh=50_000_000_000, averageVolu
 
 
     return filtered_symbols_df
+
+
+def update_time_to_expiration(df, expiration_column, time_to_expiration_column, days_from_now):
+    """
+    Updates the 'time_to_expiration' column in a DataFrame by recalculating it
+    from the 'expiration' column based on today + a specified number of days.
+
+    Parameters:
+    - df (pd.DataFrame): The input DataFrame.
+    - expiration_column (str): The name of the column with expiration dates (format 'YYYY-MM-DD').
+    - time_to_expiration_column (str): The name of the column to update with recalculated values.
+    - days_from_now (int): Number of days from today to consider as the reference date.
+
+    Returns:
+    - pd.DataFrame: The updated DataFrame with modified 'time_to_expiration'.
+    """
+    # Convert the expiration column to datetime if it's not already
+    df[expiration_column] = pd.to_datetime(df[expiration_column])
+
+    # Calculate the future reference date
+    future_reference_date = datetime.now() + timedelta(days=int(days_from_now))
+
+    # Calculate time to expiration in seconds
+    time_diff_seconds = (df[expiration_column] - future_reference_date).dt.total_seconds()
+
+    # Convert seconds to years and ensure non-negative values
+    time_to_expiration = time_diff_seconds.clip(lower=0) / (365.0 * 24 * 60 * 60)
+
+    # Handle cases where the expiration is on or before the reference date
+    minimal_value = 1 / 365.0  # One day in years
+    df[time_to_expiration_column] = time_to_expiration.where(time_to_expiration > 0, minimal_value)
+
+    return df
+
 
 
 def calculate_time_to_expiration(expiration_date_str: str, reference_date_str: str) -> float:
@@ -396,7 +434,231 @@ def adjust_weights_to_constraints(optimized_portfolio, budget, vega_min, vega_ma
         print("Warning: Budget constraint violated after adjustments!")
     
     return optimized_portfolio
-                      
+
+
+def analyze_spot_price_impact(portfolio_df, spot_price_multipliers, process_portfolio_func, compute_stats_func):
+    """
+    Analyzes the impact of spot price changes on portfolio metrics.
+
+    Parameters:
+    - portfolio_df (pd.DataFrame): The initial portfolio DataFrame.
+    - spot_price_multipliers (list): A list of multipliers to adjust the spot price.
+    - process_portfolio_func (function): Function to process the portfolio (e.g., compute Greeks and returns).
+    - compute_stats_func (function): Function to compute portfolio-level statistics.
+
+    Returns:
+    - pd.DataFrame: A DataFrame containing aggregated portfolio stats for each spot price multiplier.
+    """
+    # Store the initial version of the portfolio
+    initial_portfolio_df = portfolio_df.copy()
+
+    # List to collect results
+    results = []
+
+    for multiplier in spot_price_multipliers:
+        # Debug: Log current multiplier
+        print(f"Analyzing spot price multiplier: {multiplier}")
+
+        # Adjust the spot price
+        adjusted_df = initial_portfolio_df.copy()
+        adjusted_df.loc[:, "spot_price"] = adjusted_df["spot_price"] * multiplier
+
+        # Debug: Confirm adjusted spot prices
+        print(f"Adjusted spot prices:\n{adjusted_df['spot_price']}")
+
+        # Process the portfolio to compute individual option metrics
+        processed_df = process_portfolio_func(adjusted_df)
+
+        # Debug: Confirm processed DataFrame
+        print(f"Processed DataFrame:\n{processed_df.head()}")
+
+        # Compute portfolio-level statistics
+        portfolio_stats = compute_stats_func(processed_df)
+
+        # Add the multiplier to the stats
+        portfolio_stats["spot_price_multiplier"] = multiplier
+
+        # Append the stats to the results
+        results.append(portfolio_stats)
+
+    # Combine all results into a single DataFrame
+    results_df = pd.concat(results, ignore_index=True)
+
+    return results_df
+
+
+
+
+
+
+def analyze_implied_volatility_impact(portfolio_df, volatility_multipliers, process_portfolio_func, compute_stats_func):
+    """
+    Analyzes the impact of implied volatility changes on portfolio metrics by iterating over a set of multipliers.
+
+    Parameters:
+    - portfolio_df (pd.DataFrame): The initial portfolio DataFrame.
+    - volatility_multipliers (list): A list of multipliers to adjust the implied volatility.
+    - process_portfolio_func (function): Function to process the portfolio (e.g., compute Greeks and returns).
+    - compute_stats_func (function): Function to compute portfolio-level statistics.
+
+    Returns:
+    - pd.DataFrame: A DataFrame containing portfolio stats for each implied volatility multiplier.
+    """
+    # Store the initial version of the portfolio (safe copy)
+    initial_portfolio_df = portfolio_df.copy(deep=True)
+
+    # List to collect results
+    results = []
+
+    # Loop through each implied volatility multiplier
+    for multiplier in volatility_multipliers:
+        # Create a temporary copy of the portfolio for this multiplier
+        temp_portfolio_df = initial_portfolio_df.copy()
+
+        # Adjust the implied volatility
+        temp_portfolio_df["impliedVolatility"] = temp_portfolio_df["impliedVolatility"] * multiplier
+
+        # Process the portfolio to compute individual option metrics
+        processed_df = process_portfolio_func(temp_portfolio_df)
+
+        # Compute portfolio-level statistics
+        portfolio_stats = compute_stats_func(processed_df)
+
+        # Add the multiplier to the stats
+        portfolio_stats["implied_volatility_multiplier"] = multiplier
+
+        # Append the stats to the results
+        results.append(portfolio_stats)
+
+    # Combine all results into a single DataFrame
+    results_df = pd.concat(results, ignore_index=True)
+
+    return results_df
+
+
+def analyze_time_passage_impact(portfolio_df, time_increments, update_time_func, process_portfolio_func, compute_stats_func):
+    """
+    Analyzes the impact of time passage on portfolio metrics by iterating over a set of time increments.
+
+    Parameters:
+    - portfolio_df (pd.DataFrame): The initial portfolio DataFrame.
+    - time_increments (list): A list of time increments in days to adjust the time to expiration.
+    - update_time_func (function): Function to update time to expiration.
+    - process_portfolio_func (function): Function to process the portfolio (e.g., compute Greeks and returns).
+    - compute_stats_func (function): Function to compute portfolio-level statistics.
+
+    Returns:
+    - pd.DataFrame: A DataFrame containing portfolio stats for each time increment.
+    """
+    # Store the initial version of the portfolio (safe copy)
+    initial_portfolio_df = portfolio_df.copy(deep=True)
+
+    # List to collect results
+    results = []
+
+    # Loop through each time increment
+    for days in time_increments:
+        # Create a temporary copy of the portfolio for this time increment
+        temp_portfolio_df = initial_portfolio_df.copy()
+
+        # Update time to expiration
+        temp_portfolio_df = update_time_func(
+            df=temp_portfolio_df,
+            expiration_column="expiration",
+            time_to_expiration_column="time_to_expiration",
+            days_from_now=days
+        )
+
+        # Process the portfolio to compute individual option metrics
+        processed_df = process_portfolio_func(temp_portfolio_df)
+
+        # Compute portfolio-level statistics
+        portfolio_stats = compute_stats_func(processed_df)
+
+        # Add the time increment to the stats
+        portfolio_stats["days_passed"] = days
+
+        # Append the stats to the results
+        results.append(portfolio_stats)
+
+    # Combine all results into a single DataFrame
+    results_df = pd.concat(results, ignore_index=True)
+
+    return results_df
+
+
+
+def analyze_combined_impact(
+    portfolio_df,
+    spot_price_multipliers,
+    volatility_multipliers,
+    time_increments,
+    update_time_func,
+    process_portfolio_func,
+    compute_stats_func
+):
+    """
+    Combines the impact analysis of spot price changes, implied volatility changes,
+    and time passage on portfolio metrics.
+
+    Parameters:
+    - portfolio_df (pd.DataFrame): The initial portfolio DataFrame.
+    - spot_price_multipliers (list): A list of multipliers to adjust the spot price.
+    - volatility_multipliers (list): A list of multipliers to adjust the implied volatility.
+    - time_increments (list): A list of time increments in days to adjust the time to expiration.
+    - update_time_func (function): Function to update time to expiration.
+    - process_portfolio_func (function): Function to process the portfolio (e.g., compute Greeks and returns).
+    - compute_stats_func (function): Function to compute portfolio-level statistics.
+
+    Returns:
+    - pd.DataFrame: A DataFrame containing portfolio stats for all combinations of spot price, implied volatility, and time increments.
+    """
+    # Store the initial version of the portfolio (safe copy)
+    initial_portfolio_df = portfolio_df.copy(deep=True)
+
+    # List to collect results
+    results = []
+
+    # Loop through each combination of spot price, implied volatility, and time increment
+    for spot_multiplier in spot_price_multipliers:
+        for vol_multiplier in volatility_multipliers:
+            for days in time_increments:
+                # Create a temporary copy of the portfolio for this combination
+                temp_portfolio_df = initial_portfolio_df.copy()
+
+                # Adjust spot price
+                temp_portfolio_df["spot_price"] = temp_portfolio_df["spot_price"] * spot_multiplier
+
+                # Adjust implied volatility
+                temp_portfolio_df["impliedVolatility"] = temp_portfolio_df["impliedVolatility"] * vol_multiplier
+
+                # Update time to expiration
+                temp_portfolio_df = update_time_func(
+                    df=temp_portfolio_df,
+                    expiration_column="expiration",
+                    time_to_expiration_column="time_to_expiration",
+                    days_from_now=days
+                )
+
+                # Process the portfolio to compute individual option metrics
+                processed_df = process_portfolio_func(temp_portfolio_df)
+
+                # Compute portfolio-level statistics
+                portfolio_stats = compute_stats_func(processed_df)
+
+                # Add the combination parameters to the stats
+                portfolio_stats["spot_price_multiplier"] = spot_multiplier
+                portfolio_stats["implied_volatility_multiplier"] = vol_multiplier
+                portfolio_stats["days_passed"] = days
+
+                # Append the stats to the results
+                results.append(portfolio_stats)
+
+    # Combine all results into a single DataFrame
+    results_df = pd.concat(results, ignore_index=True)
+
+    return results_df
+
 
 def process_portfolio(portfolio_df):
     """
@@ -405,71 +667,91 @@ def process_portfolio(portfolio_df):
     Parameters:
     - portfolio_df (pd.DataFrame): The DataFrame containing portfolio data. Must include columns:
         ["spot_price", "strike", "time_to_expiration", "impliedVolatility", "market_price", "type"].
-    - r (float): The risk-free rate.
 
     Returns:
-    - pd.DataFrame: The updated DataFrame with new columns for calculated values.
+    - pd.DataFrame: A new DataFrame with updated columns for calculated values.
     """
-    for i in range(len(portfolio_df)):
-        # Extracting row values
-        spot_price = portfolio_df.loc[i, "spot_price"]
-        strike_price = portfolio_df.loc[i, "strike"]
-        time_to_expiration = portfolio_df.loc[i, "time_to_expiration"]
-        impliedVolatility = portfolio_df.loc[i, "impliedVolatility"]
-        market_price = portfolio_df.loc[i, "market_price"]
+    def calculate_metrics(row):
+        # Extract row values
+        spot_price = row["spot_price"]
+        strike_price = row["strike"]
+        time_to_expiration = row["time_to_expiration"]
+        impliedVolatility = row["impliedVolatility"]
+        market_price = row["market_price"]
 
-        # Determine if the option is a call or put and calculate accordingly
-        if portfolio_df.loc[i, "type"] == "call":
-            bs_price = black_scholes_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "blackScholes_Price"] = bs_price
-            portfolio_df.loc[i, "expected_return"] = market_price - bs_price
-            portfolio_df.loc[i, "delta"] = delta_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "gamma"] = gamma(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "vega"] = vega(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "theta_call"] = theta_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "rho"] = rho_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+        # Initialize results dictionary
+        results = {}
 
-        elif portfolio_df.loc[i, "type"] == "put":
-            bs_price = black_scholes_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "blackScholes_Price"] = bs_price
-            portfolio_df.loc[i, "expected_return"] = market_price - bs_price
-            portfolio_df.loc[i, "delta"] = delta_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "gamma"] = gamma(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "vega"] = vega(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "theta_call"] = theta_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
-            portfolio_df.loc[i, "rho"] = rho_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+        if row["type"] == "call":
+            results["blackScholes_Price"] = black_scholes_call(
+                S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility
+            )
+            results["expected_return"] = results["blackScholes_Price"] - market_price
+            results["delta"] = delta_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["gamma"] = gamma(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["vega"] = vega(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["theta"] = theta_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["rho"] = rho_call(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+
+        elif row["type"] == "put":
+            results["blackScholes_Price"] = black_scholes_put(
+                S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility
+            )
+            results["expected_return"] = results["blackScholes_Price"] - market_price
+            results["delta"] = delta_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["gamma"] = gamma(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["vega"] = vega(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["theta"] = theta_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+            results["rho"] = rho_put(S=spot_price, K=strike_price, T=time_to_expiration, r=r, sigma=impliedVolatility)
+
+        return pd.Series(results)
+
+    # Apply the calculation to each row
+    updated_metrics = portfolio_df.apply(calculate_metrics, axis=1)
+
+    # Overwrite existing columns instead of creating duplicates
+    for col in updated_metrics.columns:
+        portfolio_df[col] = updated_metrics[col]
 
     return portfolio_df
 
 
-def compute_portfolio_stats(portfolio_df):
+
+def compute_portfolio_stats(processed_df):
     """
-    Computes portfolio-level totals for Greeks and expected returns.
+    Computes portfolio-level totals for Greeks and other key metrics.
 
     Parameters:
-    - portfolio_df (pd.DataFrame): The DataFrame containing portfolio data. Must include columns:
-        ["delta", "vega", "gamma", "theta", "rho", "expected_return", "optimized_N"].
+    - processed_df (pd.DataFrame): The processed portfolio DataFrame.
 
     Returns:
-    - pd.DataFrame: A single-row DataFrame with aggregated portfolio-level results.
+    - pd.DataFrame: A single-row DataFrame with total portfolio-level metrics.
     """
-    # List of Greeks to process
-    greeks = ["delta", "vega", "gamma", "theta", "rho"]
-    
-    # Initialize a dictionary to store portfolio totals
-    portfolio_data = {}
-    
-    # Compute the weighted totals for each Greek
-    for greek in greeks:
-        portfolio_data[f"total_{greek}"] = (portfolio_df[greek] * portfolio_df["optimized_N"]*100).sum()
+    # Columns to aggregate and their corresponding output keys
+    metrics_to_aggregate = {
+        "delta": "total_delta",
+        "vega": "total_vega",
+        "gamma": "total_gamma",
+        "theta": "total_theta",
+        "rho": "total_rho",
+        "expected_return": "total_expected_return",
+        "market_price": "total_cost",
+    }
 
-    # Compute the weighted total expected return
-    portfolio_data["total_expected_return"] = (portfolio_df["expected_return"] * portfolio_df["optimized_N"]*100).sum()
+    # Initialize stats dictionary
+    stats = {}
 
-    # Convert to DataFrame
-    portfolio_summary_df = pd.DataFrame([portfolio_data])
-    
-    return portfolio_summary_df
+    for column, total_key in metrics_to_aggregate.items():
+        if column in processed_df.columns:
+            processed_df[column] = pd.to_numeric(processed_df[column], errors="coerce").fillna(0)
+            stats[total_key] = (processed_df[column] * processed_df["optimized_N"] * 100).sum()
+        else:
+            stats[total_key] = 0  # Default to 0 if the column is missing
+
+    # Convert stats dictionary to a DataFrame
+    return pd.DataFrame([stats])
+
+
 
 
 def increment_dates(dataframe, date_column, days_increment):
@@ -491,3 +773,44 @@ def increment_dates(dataframe, date_column, days_increment):
     dataframe[date_column] += timedelta(days=days_increment)
     
     return dataframe
+
+def plot_interactive_3d_surface(data, x_col, y_col, z_col):
+    """
+    Creates an interactive 3D surface plot of portfolio analysis data using Plotly.
+
+    Parameters:
+    - data (pd.DataFrame): The DataFrame containing the analysis data.
+    - x_col (str): The column name to use for the X-axis.
+    - y_col (str): The column name to use for the Y-axis.
+    - z_col (str): The column name to use for the Z-axis.
+    """
+    # Extract the data for plotting
+    x = data[x_col]
+    y = data[y_col]
+    z = data[z_col]
+
+    # Create a grid for smoother plotting
+    xi = np.linspace(x.min(), x.max(), 100)
+    yi = np.linspace(y.min(), y.max(), 100)
+    xi, yi = np.meshgrid(xi, yi)
+
+    # Interpolate the Z values over the grid
+    zi = griddata((x, y), z, (xi, yi), method='cubic')
+
+    # Create the interactive 3D surface plot
+    fig = go.Figure(data=[go.Surface(z=zi, x=xi[0], y=yi[:, 0], colorscale='Viridis')])
+
+    # Update layout for better visualization
+    fig.update_layout(
+        title=f'Interactive 3D Surface Plot of {z_col} vs {x_col} and {y_col}',
+        scene=dict(
+            xaxis_title=x_col,
+            yaxis_title=y_col,
+            zaxis_title=z_col
+        ),
+        margin=dict(l=0, r=0, b=0, t=40)
+    )
+
+    # Show the plot
+    fig.show()
+
