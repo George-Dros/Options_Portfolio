@@ -201,6 +201,8 @@ def calculate_time_to_expiration_from_future(df, date_column, days_from_now):
 
     return time_to_expiration
 
+
+
 def get_option_chains_spot(ticker_symbol, retries=3, delay=2, start_date=None, end_date=None):
     """
     Fetch option chains and spot price for a given ticker within a specific historical period.
@@ -215,69 +217,85 @@ def get_option_chains_spot(ticker_symbol, retries=3, delay=2, start_date=None, e
     Returns:
     tuple: A tuple containing calls DataFrame, puts DataFrame, and spot price.
     """
-    # Fetch the ticker data
+    # Initialize the ticker
     ticker = yf.Ticker(ticker_symbol)
-    for attempt in range(retries):
+    
+    for attempt in range(1, retries + 1):
         try:
-            # Get the historical spot price
+            # Fetch spot price
             if start_date and end_date:
-                # Fetch spot price for the given date range
+                # Validate date formats
+                try:
+                    datetime.strptime(start_date, '%Y-%m-%d')
+                    datetime.strptime(end_date, '%Y-%m-%d')
+                except ValueError:
+                    raise ValueError("start_date and end_date must be in 'YYYY-MM-DD' format.")
+                
                 history = ticker.history(start=start_date, end=end_date)
             else:
-                # Default to 1-day historical data
-                history = ticker.history(period="1d")
-
-            # Check if the history DataFrame is empty
-            if history.empty:
-                raise ValueError(f"No historical data available for ticker {ticker_symbol}.")
-
-            # Get the spot price from the history DataFrame (use the first available price)
-            spot_price = history["Close"].iloc[0]
-
-            # Get expiration dates
-            expiration_dates = ticker.options  # Expiration dates
-
+                # Use current market price directly
+                info = ticker.info
+                if 'regularMarketPrice' not in info:
+                    raise ValueError(f"Could not retrieve regularMarketPrice for ticker {ticker_symbol}.")
+                spot_price = info['regularMarketPrice']
+            
+            # If using history, extract spot price
+            if start_date and end_date:
+                if history.empty:
+                    raise ValueError(f"No historical data available for ticker {ticker_symbol} between {start_date} and {end_date}.")
+                spot_price = history['Close'].iloc[-1]  # Use the latest available close price
+            
+            # Fetch expiration dates
+            expiration_dates = ticker.options
+            if not expiration_dates:
+                raise ValueError(f"No options data available for ticker {ticker_symbol}.")
+            
             # Fetch call and put options for each expiration date
-            calls_dict = {date: ticker.option_chain(date).calls for date in expiration_dates}
-            puts_dict = {date: ticker.option_chain(date).puts for date in expiration_dates}
-
-            # Add expiration column to each DataFrame in calls_dict and puts_dict
-            for date, df in calls_dict.items():
-                df['expiration'] = date
-
-            for date, df in puts_dict.items():
-                df['expiration'] = date
-
-            # Concatenate all DataFrames from calls_dict and puts_dict
-            calls_all = pd.concat(calls_dict.values(), ignore_index=True)
-            puts_all = pd.concat(puts_dict.values(), ignore_index=True)
-
-            # For calls_all DataFrame
+            calls_list = []
+            puts_list = []
+            for date in expiration_dates:
+                option_chain = ticker.option_chain(date)
+                calls = option_chain.calls.copy()
+                puts = option_chain.puts.copy()
+                
+                calls['expiration'] = date
+                puts['expiration'] = date
+                
+                calls_list.append(calls)
+                puts_list.append(puts)
+            
+            # Concatenate all calls and puts
+            calls_all = pd.concat(calls_list, ignore_index=True)
+            puts_all = pd.concat(puts_list, ignore_index=True)
+            
+            # Select relevant columns
             calls_all = calls_all[["strike", "lastPrice", "impliedVolatility", "expiration"]]
-            calls_all["time_to_expiration"] = calls_all["expiration"].apply(
-                lambda x: calculate_time_to_expiration(x, history.index[0].strftime('%Y-%m-%d'))
-            )
-            calls_all = calls_all[calls_all["time_to_expiration"] > 0.0]
-            calls_all = calls_all.reset_index(drop=True)
-
-            # For puts_all DataFrame
             puts_all = puts_all[["strike", "lastPrice", "impliedVolatility", "expiration"]]
-            puts_all["time_to_expiration"] = puts_all["expiration"].apply(
-                lambda x: calculate_time_to_expiration(x, history.index[0].strftime('%Y-%m-%d'))
+            
+            # Calculate time to expiration
+            current_date_str = datetime.today().strftime('%Y-%m-%d')
+            calls_all["time_to_expiration"] = calls_all["expiration"].apply(
+                lambda x: calculate_time_to_expiration(x, current_date_str)
             )
-            puts_all = puts_all[puts_all["time_to_expiration"] > 0.0]
-            puts_all = puts_all.reset_index(drop=True)
-
-            # If successful, return the data
+            puts_all["time_to_expiration"] = puts_all["expiration"].apply(
+                lambda x: calculate_time_to_expiration(x, current_date_str)
+            )
+            
+            # Filter options that have not expired
+            calls_all = calls_all[calls_all["time_to_expiration"] > 0.0].reset_index(drop=True)
+            puts_all = puts_all[puts_all["time_to_expiration"] > 0.0].reset_index(drop=True)
+            
+            # Return the fetched data
             return calls_all, puts_all, spot_price
+        
+        except Exception as e:
+            print(f"Attempt {attempt} failed with error: {e}")
+            if attempt < retries:
+                print(f"Retrying after {delay} seconds...")
+                time.sleep(delay)
+            else:
+                raise ValueError(f"Failed to retrieve data for ticker {ticker_symbol} after {retries} attempts.")
 
-        except (IndexError, ValueError) as e:
-            # Print a warning and retry after a delay
-            print(f"Attempt {attempt + 1} failed with error: {e} - Retrying after {delay} seconds...")
-            time.sleep(delay)
-
-    # If all retries fail, raise an error
-    raise ValueError(f"Failed to get spot price and options data for ticker {ticker_symbol} after {retries} attempts.")
 
     
     
@@ -773,6 +791,56 @@ def increment_dates(dataframe, date_column, days_increment):
     dataframe[date_column] += timedelta(days=days_increment)
     
     return dataframe
+
+
+
+def plot_static_3d_surface(data, x_col, y_col, z_col, output_file=None):
+    """
+    Creates a static 3D surface plot of portfolio analysis data using Matplotlib.
+
+    Parameters:
+    - data (pd.DataFrame): The DataFrame containing the analysis data.
+    - x_col (str): The column name to use for the X-axis.
+    - y_col (str): The column name to use for the Y-axis.
+    - z_col (str): The column name to use for the Z-axis.
+    - output_file (str, optional): If provided, saves the plot to this file path.
+    """
+    # Extract the data for plotting
+    x = data[x_col]
+    y = data[y_col]
+    z = data[z_col]
+
+    # Create a grid for smoother plotting
+    xi = np.linspace(x.min(), x.max(), 100)
+    yi = np.linspace(y.min(), y.max(), 100)
+    xi, yi = np.meshgrid(xi, yi)
+
+    # Interpolate the Z values over the grid
+    zi = griddata((x, y), z, (xi, yi), method='cubic')
+
+    # Create the static 3D surface plot
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot the surface
+    surf = ax.plot_surface(xi, yi, zi, cmap='viridis', edgecolor='none')
+
+    # Add labels and title
+    ax.set_title(f'{z_col} vs {x_col} and {y_col}')
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+    ax.set_zlabel(z_col)
+
+    # Add a color bar
+    fig.colorbar(surf, shrink=0.5, aspect=10)
+
+    # Save the plot if an output file is specified
+    if output_file:
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+
+    # Show the plot
+    plt.show()
+
 
 def plot_interactive_3d_surface(data, x_col, y_col, z_col):
     """
